@@ -1,0 +1,9 @@
+{
+	
+	"apikey":"",
+	"apisecret":"",
+	"maxusedmargin": 40,
+	"percentbalancefororders": 1,
+	"testing": true
+
+}

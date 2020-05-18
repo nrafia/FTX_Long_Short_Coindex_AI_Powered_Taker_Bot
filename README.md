@@ -1,0 +1,1 @@
+# FTX_Long_Short_Coindex_AI_Powered_Taker_Bot
