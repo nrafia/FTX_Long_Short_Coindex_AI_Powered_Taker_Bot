@@ -9,8 +9,8 @@ from threading import Timer
 import ccxt
 import requests
 import json
-
-
+import math
+from time import sleep
 d         = datetime.datetime.now()  
 epoch = datetime.datetime(1970,1,1)
 start_time = int((d - epoch).total_seconds())
@@ -48,7 +48,7 @@ with open('conf.json', 'r') as conf:
 obj = json.loads(data)
 ftxKEY     = obj["apikey"]#"NqOlVRaqGM-XCX0cpf67UYxvT2tcB56SHlS-tlB-"#"VC4d7Pj1"
 ftxSECRET  = obj["apisecret"]#gnBQZHa8-cT1E-p0YyNqHkx9Y_8bdk"#"IB4VEP26OzTNUt4JhNILOW9aDuzctbGs_K6izxQG2dI"
-if 'KEY' in os.environ:
+if 'ftxkey' in os.environ:
     ftxKEY = os.environ['ftxkey']
 
     ftxSECRET = os.environ['ftxsecret']
@@ -56,15 +56,28 @@ maxmargin = float(obj['maxusedmargin'])
 percentbalancefororders = float(obj['percentbalancefororders']) # 0.1% of balance / maxlev will be used in each order
 percentbalancefororders = percentbalancefororders / 100
 testing = obj['testing']
+
+SECONDS_IN_DAY    = 3600 * 24
+SECONDS_IN_YEAR  = 365 * SECONDS_IN_DAY
+
 class FTXTaker( object ):
     
     def __init__( self, test=testing ):
         self.ftx = None
         self.test = test
-        self.futures            = []
+        self.lts            = []
         self.bal = None
+        self.bal_init = None
+        self.bal_btc = None
+        self.bal_btc_init = None
         self.positions = {}
         self.margin = None
+        self.skew_size = {}
+        self.IM = 0
+        self.LEV = 0
+        self.mean_looptimes    = []
+        self.mean_looptime = 1
+        self.start_time      = datetime.datetime.utcnow()
     def create_client( self ):
         self.ftx     = ccxt.ftx({
             'enableRateLimit': True,
@@ -73,7 +86,15 @@ class FTXTaker( object ):
         })
     def check_balance(self):
         bal2 = self.ftx.fetchBalance()
-        self.bal = bal2[ 'USDT' ] [ 'total' ]
+        newbal = 0
+        for coin in bal2['info']['result']:
+            newbal = newbal + coin['usdValue']
+        self.bal = newbal
+
+        self.bal_btc = self.bal / self.get_spot()
+        if self.bal_init == None:
+            self.bal_init = self.bal
+            self.bal_btc_init = self.bal_btc
         marginftx = 0.1
         marginbinance = 0.1
         
@@ -83,15 +104,8 @@ class FTXTaker( object ):
 
     def get_bbo( self, contract ): # Get best b/o excluding own orders
         try:
-            if 'ftx' in contract:
-                contract = contract.split('-')[0] +  '-PERP'
-            if '-' in contract:
-                ob      = self.ftx.fetchOrderBook( contract )
-            else:
-                if '-' in contract:
-                    ob      = self.ftx.fetchOrderBook( contract )
-                else:
-                    ob      = self.ftx.fetchOrderBook( contract + '-PERP')
+            
+            ob      = self.ftx.fetchOrderBook( contract)
             bids    = ob[ 'bids' ]
             asks    = ob[ 'asks' ]
        
@@ -106,119 +120,216 @@ class FTXTaker( object ):
             print({'bid': best_bid, 'ask': best_ask})
             return { 'bid': best_bid, 'ask': best_ask }
         except: 
-            abc=123
+            PrintException()
     def post_info( self ):
         positionsToPost = {}
         for pos in self.positions:
-            if self.positions[pos]['size'] != 0:
+            if self.positions[pos]['usdValue'] != 0:
                 positionsToPost[pos] = self.positions[pos]
         data = {'start_time': start_time, 'balance': self.bal, 'positions': positionsToPost, 'IP': host_ip}
         print(data)
-        posted = requests.post("http://someurl:someport/info_updatte", data=data, verify=False, timeout=5)
-        print(posted)
-        r = Timer(60, self.post_info, ())
-        r.start() 
+        """
+        lt = 'ETHBEAR/USDT'
+        lorm = "market"
+        direction = 'buy'
+        gogo = True
+        prc = self.get_bbo(lt)['bid']
+
+        qty = self.bal * maxmargin * percentbalancefororders 
+        qty = qty / prc
+        if lt in self.positions:
+            if self.positions[lt]['usdValue'] is not None and self.margin is not None:
+                if direction == 'buy' and self.positions[lt]['usdValue'] > 0 and self.margin > maxmargin:
+                    gogo = False
+                if  direction == 'sell' and self.positions[lt]['usdValue'] < 0 and self.margin > maxmargin:
+                    gogo = False
+        print(gogo)
+        if gogo == True:
+            r = self.ftx.createOrder(  lt, lorm, direction, qty)   
+            print(r)
+        """
+        if self.test == False:
+
+            posted = requests.post("http://someurl:someport/info_updatte", data=data, verify=False, timeout=5)
+            print(posted)
+            r = Timer(60, self.post_info, ())
+            r.start() 
+    def get_spot( self ):
+        return self.get_bbo('BTC-PERP')['bid']
+    def output_status( self ):
+        
+
+        
+        now  = datetime.datetime.utcnow()
+        days    = ( now - self.start_time ).total_seconds() / SECONDS_IN_DAY
+        print    (   '********************************************************************' )
+        print    (   'Start Time:       %s' % self.start_time.strftime( '%Y-%m-%d %H:%M:%S' ))
+        print    (   'Current Time:   %s' % now.strftime( '%Y-%m-%d %H:%M:%S' ))
+        print    (   'Days:           %s' % round( days, 1 ))
+        print    (   'Hours:             %s' % round( days * 24, 1 ))
+        print    (   'Spot Price:       %s' % self.get_spot())
+        
+        
+        pnl_usd = self.bal - self.bal_init
+        pnl_btc = self.bal_btc - self.bal_btc_init
+        
+        print    (   'Equity ($):       %7.2f'   % self.bal)
+        print    (   'P&L ($)           %7.2f'   % pnl_usd)
+        print    (   'Equity (BTC):   %7.4f'   % self.bal_btc)
+        print    (   'P&L (BTC)       %7.4f'   % pnl_btc)
+        
+        #print_dict_of_dicts( {
+        #   k: {
+        #       '$USD': self.positions[ k ][ 'usdValue' ]
+        #   } for k in self.positions.keys()
+        #   }, 
+        #   title = 'Positions' )
+        ###print(self.positions)
+        t = 0
+        a = 0
+        for k in self.positions:
+            self.skew_size[k[0:3]] = 0
+
+        for k in self.positions:
+            self.skew_size[k[0:3]] = self.skew_size[k[0:3]] + self.positions[k]['usdValue']
+        #print(' ')
+        #print('Skew')
+
+        for pos in self.skew_size:
+        
+            if self.skew_size[pos] != 0:
+                print    (   pos + ': $' + str( self.skew_size[pos]))
+
+        #print(' ')
+        #print('Positions')
+        for pos in self.positions:
+        
+            a = a + math.fabs(self.positions[pos]['usdValue'])
+            t = t + self.positions[pos]['usdValue']
+            if self.positions[pos]['usdValue'] > 0 or self.positions[pos]['usdValue'] < 0 :
+                print    (   pos + ': $' + str( self.positions[pos]['usdValue']))
+
+        print    (   '\nNet delta (exposure) USD: $' + str(t))
+        print    (   'Total absolute delta (IM exposure) USD: $' + str(a))
+        
+        acc2 = self.ftx.privateGetAccount()
+        self.LEV = acc2['result']['totalPositionSize'] / acc2['result']['totalAccountValue']
+        self.IM = self.LEV * 2
+        print    (   '(Roughly) initial margin across lts: ' + str(self.IM) + '% and (actual) leverage is ' + str(round(self.LEV * 1000)/1000) + 'x')
+
+        print    (   '\nMean Loop Time: %s' % round( self.mean_looptime, 2 ))
+            
+        ###print( '' )
+
     def run_first(self):
-        r = Timer(1, self.post_info, ())
-        r.start() 
+        
         self.create_client()
         self.get_futures()
+        for pair in self.lts:
+            self.positions[pair] = {
+            'usdValue':         0,
+            'sizeBtc':      0,
+            'averagePrice': None,
+            'floatingPl': 0}   
+        r = Timer(3, self.post_info, ())
+        r.start() 
     def run (self):
         self.run_first()
+        t_loop = datetime.datetime.utcnow()
         while True:
             self.check_balance()
             self.update_positions()
+            self.output_status()
             self.checkTrades()
+            print('sleeping...')
             sleep(1 * 60)
+            t_now      = datetime.datetime.utcnow()
+            looptime    = ( t_now - t_loop ).total_seconds()
+            
+            
+            self.mean_looptimes.append(looptime)
+            if len(self.mean_looptimes) > 100:
+                self.mean_looptimes.pop(0)
+            self.mean_looptime = sum(self.mean_looptimes) / len(self.mean_looptimes)
+            
+            t_loop    = t_now
     def update_positions( self ):
         try:
-            ##print('update_positions')
-            for pair in self.futures:
-                if '-' in pair:
-                    self.positions[pair] = {
-                    'size':         0,
-                    'sizeBtc':      0,
-                    'averagePrice': None,
-                    'floatingPl': 0}    
-                
-    
-                ex='ftx'
-                try:
-                    positions       = self.ftx.privateGetPositions()['result']
-                    ###print(self.futures)
-                    for pos in positions:
-                        ###print('ftx pos')
-                        
-                        pos['floatingPl'] = pos['unrealizedPnl']
-                        if pos['entryPrice'] is not None:
-                            pos['size'] = float(pos['netSize']) * (pos['entryPrice'])
-                        else:
-                            pos['size'] = 0
-                        #if pos['size'] == 0:
-                        #    pos['size'] = 2
-                        if pos['size'] != 0:
-                            self.positions[ pos[ 'future' ]] = pos
+            print('update_positions')
+             
+            
+
+            ex='ftx'
+            try:
+                positions       = self.ftx.privateGetLtBalances()['result']
+                ###print(self.lts)
+                for pos in positions:
+                    #print(pos)
+                    ###print('ftx pos')
+                    
+
+                    self.positions[ pos[ 'coin' ]] = pos
 
 
-                except:
-                    PrintException()
+            except:
+                PrintException()
         except:
             abc=123   
     def checkTrades(self):
         if self.test == True:
 
-            fut = 'EOS-PERP'
+            lt = 'ETHBEAR/USDT'
             lorm = "market"
             direction = 'buy'
             gogo = True
-            prc = self.get_bbo(fut)['bid']
+            prc = self.get_bbo(lt)['bid']
 
             qty = self.bal * maxmargin * percentbalancefororders 
             qty = qty / prc
-            if self.positions[fut]['size'] is not None and self.margin is not None:
-                if direction == 'buy' and self.positions[fut]['size'] > 0 and self.margin > maxmargin:
+            if self.positions[lt]['usdValue'] is not None and self.margin is not None:
+                if direction == 'buy' and self.positions[lt]['usdValue'] > 0 and self.margin > maxmargin:
                     gogo = False
-                if  direction == 'sell' and self.positions[fut]['size'] < 0 and self.margin > maxmargin:
+                if  direction == 'sell' and self.positions[lt]['usdValue'] < 0 and self.margin > maxmargin:
                     gogo = False
-            if gogo == True:
-                self.ftx.createOrder(  fut, lorm, direction, qty)
+            #if gogo == True:
+                #self.ftx.createOrder(  lt, lorm, direction, qty)
                  
         else:
         
             r = requests.get("someurl:port/endpoint").json()
             for signal in r:
-                fut = signal['fut']
+                lt = signal['fut']
                 lorm = 'market'
                 direction = signal['direction']
                 gogo = True
-                prc = self.get_bbo(fut)
+                prc = self.get_bbo(lt)
 
                 qty = self.bal * maxmargin * percentbalancefororders 
                 qty = qty / prc
-                if self.positions[fut]['size'] is not None and self.margin is not None:
-                    if direction == 'buy' and self.positions[fut]['size'] > 0 and self.margin > maxmargin:
+                if self.positions[lt]['usdValue'] is not None and self.margin is not None:
+                    if direction == 'buy' and self.positions[lt]['usdValue'] > 0 and self.margin > maxmargin:
                         gogo = False
-                    if  direction == 'sell' and self.positions[fut]['size'] < 0 and self.margin > maxmargin:
+                    if  direction == 'sell' and self.positions[lt]['usdValue'] < 0 and self.margin > maxmargin:
                         gogo = False
                 if gogo == True:
-                    self.ftx.createOrder(  fut, lorm, direction, qty)
-        self.ftx.createOrder(  fut, lorm, direction, qty)
+                    self.ftx.createOrder(  lt, lorm, direction, qty)
                  
     def get_futures(self):
-        ftxmarkets = requests.get("https://ftx.com/api/futures").json()['result']
+        ftxmarkets = self.ftx.fetchMarkets()
         expis = []
-        allfuts = []
+        alllts = []
         for market in ftxmarkets:
-            self.futures.append(market['name'])
+            if '/' in market['symbol']:
+                self.lts.append(market['symbol'])
     def restart( self ):        
         try:
             strMsg = 'RESTARTING'
             print( strMsg )
             
-            for fut in self.futures:
-                self.cancelall(fut, 'ftx')
-            #for fut in self.futures:
-            #    self.cancelall(fut, 'binance')
+            for lt in self.lts:
+                self.cancelall(lt, 'ftx')
+            #for lt in self.lts:
+            #    self.cancelall(lt, 'binance')
             
             strMsg += ' '
             for i in range( 0, 5 ):
@@ -273,9 +384,9 @@ if __name__ == '__main__':
     except( KeyboardInterrupt, SystemExit ):
         
         ###print( "Cancelling open orders" )
-        for fut in ftxbot.futures:
-            ftxbot.cancelall(fut, 'ftx')
-            #mmbot.cancelall(fut, 'binance')
+        for lt in ftxbot.futures:
+            ftxbot.cancelall(lt, 'ftx')
+            #mmbot.cancelall(lt, 'binance')
         
         sys.exit()
     except:
